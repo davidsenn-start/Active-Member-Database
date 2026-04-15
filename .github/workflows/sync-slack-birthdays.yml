@@ -31,7 +31,8 @@ jobs:
           PROFILE_FETCH_DELAY_SECONDS: "0.2"
 
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_VERSION: "2022-06-28"
 
           NOTION_NAME_PROPERTY: "Name"
           NOTION_SLACK_ID_PROPERTY: "Slack User ID"
