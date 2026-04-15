@@ -14,9 +14,9 @@ PROFILE_DELAY = float(os.environ.get("PROFILE_FETCH_DELAY_SECONDS", "0.2"))
 # Notion
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
-NOTION_VERSION = os.environ.get("NOTION_VERSION", "2025-09-03")
+NOTION_VERSION = os.environ.get("NOTION_VERSION", "2022-06-28")
 
-# Notion property names in your database / data source
+# Notion property names in your database
 NOTION_NAME_PROPERTY = os.environ.get("NOTION_NAME_PROPERTY", "Name")
 NOTION_SLACK_ID_PROPERTY = os.environ.get("NOTION_SLACK_ID_PROPERTY", "Slack User ID")
 NOTION_BIRTHDAY_PROPERTY = os.environ.get("NOTION_BIRTHDAY_PROPERTY", "Birthday")
@@ -42,7 +42,12 @@ def all_members(channel_id):
     cursor = None
 
     while True:
-        r = call(client.conversations_members, channel=channel_id, limit=200, cursor=cursor)
+        r = call(
+            client.conversations_members,
+            channel=channel_id,
+            limit=200,
+            cursor=cursor
+        )
         members.extend(r.get("members", []))
 
         cursor = (r.get("response_metadata") or {}).get("next_cursor")
@@ -65,7 +70,7 @@ def notion_query_by_slack_id(slack_user_id):
     Find an existing Notion page by Slack User ID.
     Returns page object or None.
     """
-    url = f"https://api.notion.com/v1/data_sources/{NOTION_DATA_SOURCE_ID}/query"
+    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     payload = {
         "filter": {
             "property": NOTION_SLACK_ID_PROPERTY,
@@ -85,11 +90,13 @@ def notion_query_by_slack_id(slack_user_id):
 
 
 def notion_create_page(name, slack_user_id, birthday):
+    """
+    Create a new page in the Notion database.
+    """
     url = "https://api.notion.com/v1/pages"
     payload = {
         "parent": {
-            "type": "data_source_id",
-            "data_source_id": NOTION_DATA_SOURCE_ID
+            "database_id": NOTION_DATABASE_ID
         },
         "properties": {
             NOTION_NAME_PROPERTY: {
@@ -128,6 +135,9 @@ def notion_create_page(name, slack_user_id, birthday):
 
 
 def notion_update_page(page_id, name, birthday):
+    """
+    Update an existing Notion page.
+    """
     url = f"https://api.notion.com/v1/pages/{page_id}"
     payload = {
         "properties": {
@@ -212,7 +222,13 @@ def main():
             print(f"Error fetching {uid}: {e.response['error']}")
 
     print("\nSlack Channel Members\n")
-    print(tabulate(rows, headers=["Name", "Slack ID", "Birthday Field Value"], tablefmt="github"))
+    print(
+        tabulate(
+            rows,
+            headers=["Name", "Slack ID", "Birthday Field Value"],
+            tablefmt="github"
+        )
+    )
     print(f"\nTotal users processed: {len(rows)}")
     print(f"Notion created: {created}")
     print(f"Notion updated: {updated}")
