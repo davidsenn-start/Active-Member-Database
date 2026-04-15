@@ -13,7 +13,7 @@ PROFILE_DELAY = float(os.environ.get("PROFILE_FETCH_DELAY_SECONDS", "0.2"))
 
 # Notion
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-NOTION_DATA_SOURCE_ID = os.environ["NOTION_DATA_SOURCE_ID"]
+NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 NOTION_VERSION = os.environ.get("NOTION_VERSION", "2025-09-03")
 
 # Notion property names in your database / data source
