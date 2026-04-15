@@ -23,17 +23,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Debug files
+        run: |
+          echo "Current commit:"
+          git rev-parse HEAD
+          echo ""
+          echo "Search for data_sources:"
+          grep -R "data_sources" . || true
+          echo ""
+          echo "script.py head:"
+          sed -n '1,120p' script.py
+          echo ""
+          echo "NOTION_DATABASE_ID set?"
+          if [ -z "$NOTION_DATABASE_ID" ]; then
+            echo "EMPTY"
+          else
+            echo "YES"
+          fi
+        env:
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+
       - name: Run sync
         env:
           SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
           SOURCE_CHANNEL_ID: ${{ secrets.SOURCE_CHANNEL_ID }}
           BIRTHDAY_FIELD_ID: ${{ secrets.BIRTHDAY_FIELD_ID }}
           PROFILE_FETCH_DELAY_SECONDS: "0.2"
-
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           NOTION_VERSION: "2022-06-28"
-
           NOTION_NAME_PROPERTY: "Name"
           NOTION_SLACK_ID_PROPERTY: "Slack User ID"
           NOTION_BIRTHDAY_PROPERTY: "Birthday"
