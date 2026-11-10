@@ -43,6 +43,10 @@ SLACK_FIELDS = {
     "Interests": "Xf0AUU5MKSMD",
 }
 
+# Oldest member that is synced (Zeynep Colak, first of the FS25 batch).
+# Slack has no join date, but user IDs grow with account creation, so older members have smaller IDs.
+OLDEST_MEMBER_ID = "U09GGMNPU1J"
+
 # Notion property whose value is turned into country names, and the list of countries
 COUNTRY_PROPERTY = "Nationality"
 COUNTRIES_FILE = Path(__file__).parent / "countries.csv"
@@ -234,6 +238,7 @@ def main():
     updated = 0
     deactivated = 0
     removed = []
+    removed_older = 0
     titles_set = 0
     failed = 0
 
@@ -251,6 +256,12 @@ def main():
         name = user.get("real_name") or user.get("profile", {}).get("display_name") or ""
 
         try:
+            if uid < OLDEST_MEMBER_ID:
+                if uid in existing_pages:
+                    notion_archive_page(existing_pages[uid]["id"])
+                    removed_older += 1
+                continue
+
             if user.get("deleted"):
                 if uid in existing_pages and NOTION_ACTIVE_PROPERTY in schema:
                     notion_set_inactive(existing_pages[uid]["id"])
@@ -295,6 +306,7 @@ def main():
     print(f"Notion updated: {updated}")
     print(f"Notion set inactive: {deactivated}")
     print(f"Notion removed (no first and last name in Slack): {len(removed)} {', '.join(removed)}")
+    print(f"Notion removed (joined Slack before Zeynep Colak): {removed_older}")
     print(f"Slack titles updated from Notion: {titles_set}")
     print(f"Failed: {failed}")
 
