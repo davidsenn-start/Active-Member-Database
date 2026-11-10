@@ -19,8 +19,9 @@ NOTION_NAME_PROPERTY = "Name"  # type: Title
 NOTION_SLACK_ID_PROPERTY = "Slack User ID"  # type: Text
 NOTION_ACTIVE_PROPERTY = "Active"  # type: Checkbox
 
-# Notion property name (type: Text) -> Slack custom profile field ID
+# Notion property name -> Slack custom profile field ID
 # IDs come from https://slack.com/api/team.profile.get?visibility=all
+# The Notion type of each property (Text, Phone, URL, Email, Date, Select) is read from the database.
 SLACK_FIELDS = {
     "Birthday": "Xf05STPV0Z3R",
     "Department": "Xf05TAPCM8PN",
@@ -104,18 +105,41 @@ def notion_pages_by_slack_id():
     return pages
 
 
+def notion_schema():
+    """Map each property name of the database to its Notion type."""
+    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}"
+    resp = requests.get(url, headers=notion_headers(), timeout=30)
+    resp.raise_for_status()
+    return {name: prop["type"] for name, prop in resp.json()["properties"].items()}
+
+
 def text(value):
     return {"rich_text": [{"text": {"content": value}}] if value else []}
 
 
-def notion_properties(name, slack_user_id, active, profile_values):
+def notion_value(prop_type, value):
+    """Format a Slack field value for a Notion property of the given type."""
+    if prop_type in ("phone_number", "url", "email"):
+        return {prop_type: value or None}
+    if prop_type == "date":
+        return {"date": {"start": value} if value else None}
+    if prop_type == "select":
+        return {"select": {"name": value} if value else None}
+    if prop_type == "rich_text":
+        return text(value)
+    raise ValueError(f"Notion property type '{prop_type}' is not supported")
+
+
+def notion_properties(schema, name, slack_user_id, profile_values):
     properties = {
         NOTION_NAME_PROPERTY: {"title": [{"text": {"content": name or slack_user_id}}]},
         NOTION_SLACK_ID_PROPERTY: text(slack_user_id),
-        NOTION_ACTIVE_PROPERTY: {"checkbox": active},
     }
+    if NOTION_ACTIVE_PROPERTY in schema:
+        properties[NOTION_ACTIVE_PROPERTY] = {"checkbox": True}
     for prop, value in profile_values.items():
-        properties[prop] = text(value)
+        if prop in schema:
+            properties[prop] = notion_value(schema[prop], value)
     return properties
 
 
@@ -150,6 +174,11 @@ def main():
     deactivated = 0
     failed = 0
 
+    schema = notion_schema()
+    missing = [p for p in [NOTION_ACTIVE_PROPERTY, *SLACK_FIELDS] if p not in schema]
+    if missing:
+        print(f"Not in the Notion database, skipped: {', '.join(missing)}")
+
     existing_pages = notion_pages_by_slack_id()
 
     for user in all_slack_users():
@@ -158,13 +187,13 @@ def main():
 
         try:
             if user.get("deleted"):
-                if uid in existing_pages:
+                if uid in existing_pages and NOTION_ACTIVE_PROPERTY in schema:
                     notion_set_inactive(existing_pages[uid])
                     deactivated += 1
                 continue
 
             values = slack_profile_values(uid)
-            properties = notion_properties(name, uid, True, values)
+            properties = notion_properties(schema, name, uid, values)
 
             if uid in existing_pages:
                 notion_update_page(existing_pages[uid], properties)
