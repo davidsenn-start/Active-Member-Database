@@ -1,5 +1,7 @@
 import os
+import sys
 import time
+
 import requests
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -7,19 +9,33 @@ from tabulate import tabulate
 
 # ---- CONFIG ----
 SLACK_TOKEN = os.environ["SLACK_TOKEN"]
-SOURCE_CHANNEL_ID = os.environ.get("SOURCE_CHANNEL_ID", "C05TWLUUT7S")
-BIRTHDAY_FIELD_ID = os.environ.get("BIRTHDAY_FIELD_ID", "Xf05STPV0Z3R")
-PROFILE_DELAY = float(os.environ.get("PROFILE_FETCH_DELAY_SECONDS", "0.2"))
-
-# Notion
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
-NOTION_VERSION = os.environ.get("NOTION_VERSION", "2022-06-28")
+NOTION_VERSION = "2022-06-28"
+PROFILE_DELAY = 0.2
 
-# Notion property names in your database
-NOTION_NAME_PROPERTY = os.environ.get("NOTION_NAME_PROPERTY", "Name")
-NOTION_SLACK_ID_PROPERTY = os.environ.get("NOTION_SLACK_ID_PROPERTY", "Slack User ID")
-NOTION_BIRTHDAY_PROPERTY = os.environ.get("NOTION_BIRTHDAY_PROPERTY", "Birthday")
+# Notion properties that are always used
+NOTION_NAME_PROPERTY = "Name"  # type: Title
+NOTION_SLACK_ID_PROPERTY = "Slack User ID"  # type: Text
+NOTION_ACTIVE_PROPERTY = "Active"  # type: Checkbox
+
+# Notion property name (type: Text) -> Slack custom profile field ID
+# IDs come from https://slack.com/api/team.profile.get?visibility=all
+SLACK_FIELDS = {
+    "Birthday": "Xf05STPV0Z3R",
+    "Department": "Xf05TAPCM8PN",
+    "Batch": "Xf05T1LNGTB8",
+    "Nationality": "Xf0AV382B7GT",
+    "Phone": "Xf05STPV0UVD",
+    "Status": "Xf05TXA040N4",
+    "Title": "Xf05T1LNG7TQ",
+    "University": "Xf0AV7HDFTL6",
+    "Degree": "Xf0AVD77MTEY",
+    "LinkedIn": "Xf0AV9K6BS9Y",
+    "Instagram": "Xf0AV382PDV1",
+    "Private Email": "Xf0AV7HDSA2J",
+    "Interests": "Xf0AUU5MKSMD",
+}
 
 client = WebClient(token=SLACK_TOKEN)
 
@@ -36,25 +52,20 @@ def call(fn, **kwargs):
             raise
 
 
-def all_members(channel_id):
-    """Get all members from a channel."""
-    members = []
+def all_slack_users():
+    """Get every user of the workspace, including deactivated ones."""
+    users = []
     cursor = None
 
     while True:
-        r = call(
-            client.conversations_members,
-            channel=channel_id,
-            limit=200,
-            cursor=cursor
-        )
-        members.extend(r.get("members", []))
+        r = call(client.users_list, limit=200, cursor=cursor)
+        users.extend(r.get("members", []))
 
         cursor = (r.get("response_metadata") or {}).get("next_cursor")
         if not cursor:
             break
 
-    return members
+    return [u for u in users if not u.get("is_bot") and u["id"] != "USLACKBOT"]
 
 
 def notion_headers():
@@ -65,174 +76,123 @@ def notion_headers():
     }
 
 
-def notion_query_by_slack_id(slack_user_id):
-    """
-    Find an existing Notion page by Slack User ID.
-    Returns page object or None.
-    """
+def notion_pages_by_slack_id():
+    """Load all pages of the database once and map Slack User ID -> page ID."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-    payload = {
-        "filter": {
-            "property": NOTION_SLACK_ID_PROPERTY,
-            "rich_text": {
-                "equals": slack_user_id
-            }
-        },
-        "page_size": 1
+    pages = {}
+    cursor = None
+
+    while True:
+        payload = {"page_size": 100}
+        if cursor:
+            payload["start_cursor"] = cursor
+
+        resp = requests.post(url, headers=notion_headers(), json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        for page in data.get("results", []):
+            texts = page["properties"].get(NOTION_SLACK_ID_PROPERTY, {}).get("rich_text", [])
+            slack_id = "".join(t.get("plain_text", "") for t in texts).strip()
+            if slack_id:
+                pages[slack_id] = page["id"]
+
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+
+    return pages
+
+
+def text(value):
+    return {"rich_text": [{"text": {"content": value}}] if value else []}
+
+
+def notion_properties(name, slack_user_id, active, profile_values):
+    properties = {
+        NOTION_NAME_PROPERTY: {"title": [{"text": {"content": name or slack_user_id}}]},
+        NOTION_SLACK_ID_PROPERTY: text(slack_user_id),
+        NOTION_ACTIVE_PROPERTY: {"checkbox": active},
     }
-
-    resp = requests.post(url, headers=notion_headers(), json=payload, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-
-    results = data.get("results", [])
-    return results[0] if results else None
+    for prop, value in profile_values.items():
+        properties[prop] = text(value)
+    return properties
 
 
-def notion_create_page(name, slack_user_id, birthday):
-    """
-    Create a new page in the Notion database.
-    """
+def notion_create_page(properties):
     url = "https://api.notion.com/v1/pages"
-    payload = {
-        "parent": {
-            "database_id": NOTION_DATABASE_ID
-        },
-        "properties": {
-            NOTION_NAME_PROPERTY: {
-                "title": [
-                    {
-                        "text": {
-                            "content": name or slack_user_id
-                        }
-                    }
-                ]
-            },
-            NOTION_SLACK_ID_PROPERTY: {
-                "rich_text": [
-                    {
-                        "text": {
-                            "content": slack_user_id
-                        }
-                    }
-                ]
-            },
-            NOTION_BIRTHDAY_PROPERTY: {
-                "rich_text": [
-                    {
-                        "text": {
-                            "content": birthday or ""
-                        }
-                    }
-                ]
-            }
-        }
-    }
-
+    payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
     resp = requests.post(url, headers=notion_headers(), json=payload, timeout=30)
     resp.raise_for_status()
-    return resp.json()
 
 
-def notion_update_page(page_id, name, birthday):
-    """
-    Update an existing Notion page.
-    """
+def notion_update_page(page_id, properties):
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    payload = {
-        "properties": {
-            NOTION_NAME_PROPERTY: {
-                "title": [
-                    {
-                        "text": {
-                            "content": name or ""
-                        }
-                    }
-                ]
-            },
-            NOTION_BIRTHDAY_PROPERTY: {
-                "rich_text": [
-                    {
-                        "text": {
-                            "content": birthday or ""
-                        }
-                    }
-                ]
-            }
-        }
-    }
-
-    resp = requests.patch(url, headers=notion_headers(), json=payload, timeout=30)
+    resp = requests.patch(url, headers=notion_headers(), json={"properties": properties}, timeout=30)
     resp.raise_for_status()
-    return resp.json()
 
 
-def sync_user_to_notion(name, slack_user_id, birthday):
-    """
-    Upsert user into Notion:
-    - search by Slack User ID
-    - update if exists
-    - create if not
-    """
-    existing = notion_query_by_slack_id(slack_user_id)
+def notion_set_inactive(page_id):
+    notion_update_page(page_id, {NOTION_ACTIVE_PROPERTY: {"checkbox": False}})
 
-    if existing:
-        notion_update_page(existing["id"], name, birthday)
-        return "updated"
-    else:
-        notion_create_page(name, slack_user_id, birthday)
-        return "created"
+
+def slack_profile_values(uid):
+    """Read the custom profile fields of one user."""
+    prof = call(client.users_profile_get, user=uid)["profile"]
+    fields = prof.get("fields") or {}
+    return {prop: (fields.get(field_id) or {}).get("value", "") for prop, field_id in SLACK_FIELDS.items()}
 
 
 def main():
     rows = []
     created = 0
     updated = 0
-    failed_notion = 0
+    deactivated = 0
+    failed = 0
 
-    for uid in all_members(SOURCE_CHANNEL_ID):
+    existing_pages = notion_pages_by_slack_id()
+
+    for user in all_slack_users():
+        uid = user["id"]
+        name = user.get("real_name") or user.get("profile", {}).get("display_name") or ""
+
         try:
-            resp = call(client.users_profile_get, user=uid)
-            prof = resp["profile"]
+            if user.get("deleted"):
+                if uid in existing_pages:
+                    notion_set_inactive(existing_pages[uid])
+                    deactivated += 1
+                continue
 
-            name = prof.get("real_name") or prof.get("display_name") or ""
-            fields = prof.get("fields") or {}
-            birthday = (fields.get(BIRTHDAY_FIELD_ID) or {}).get("value", "")
+            values = slack_profile_values(uid)
+            properties = notion_properties(name, uid, True, values)
 
-            rows.append([name, uid, birthday])
+            if uid in existing_pages:
+                notion_update_page(existing_pages[uid], properties)
+                updated += 1
+            else:
+                notion_create_page(properties)
+                created += 1
 
-            try:
-                result = sync_user_to_notion(name, uid, birthday)
-                if result == "created":
-                    created += 1
-                elif result == "updated":
-                    updated += 1
-            except requests.HTTPError as e:
-                failed_notion += 1
-                body = ""
-                try:
-                    body = e.response.text
-                except Exception:
-                    pass
-                print(f"Notion sync failed for {uid}: {e} {body}")
-
+            rows.append([name, uid, values.get("Birthday", "")])
             time.sleep(PROFILE_DELAY)
 
         except SlackApiError as e:
-            print(f"Error fetching {uid}: {e.response['error']}")
+            failed += 1
+            print(f"Slack error for {uid}: {e.response['error']}")
+        except requests.HTTPError as e:
+            failed += 1
+            print(f"Notion error for {uid}: {e} {e.response.text}")
 
-    print("\nSlack Channel Members\n")
-    print(
-        tabulate(
-            rows,
-            headers=["Name", "Slack ID", "Birthday Field Value"],
-            tablefmt="github"
-        )
-    )
-    print(f"\nTotal users processed: {len(rows)}")
+    print("\nActive Slack members\n")
+    print(tabulate(rows, headers=["Name", "Slack ID", "Birthday"], tablefmt="github"))
+    print(f"\nTotal active users processed: {len(rows)}")
     print(f"Notion created: {created}")
     print(f"Notion updated: {updated}")
-    print(f"Notion failed: {failed_notion}")
+    print(f"Notion set inactive: {deactivated}")
+    print(f"Failed: {failed}")
+
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
