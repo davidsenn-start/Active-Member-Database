@@ -1,6 +1,10 @@
+import csv
+import difflib
 import os
+import re
 import sys
 import time
+from pathlib import Path
 
 import requests
 from slack_sdk import WebClient
@@ -38,7 +42,44 @@ SLACK_FIELDS = {
     "Interests": "Xf0AUU5MKSMD",
 }
 
+# Notion property whose value is turned into country names, and the list of countries
+COUNTRY_PROPERTY = "Nationality"
+COUNTRIES_FILE = Path(__file__).parent / "countries.csv"
+
 client = WebClient(token=SLACK_TOKEN)
+
+
+def country_lookup():
+    """Map every lowercase country name, adjective and alias to the country name."""
+    lookup = {}
+    with open(COUNTRIES_FILE, encoding="utf-8") as f:
+        for row in csv.DictReader(f, delimiter=";"):
+            for alias in [row["country"], *row["other_names"].split("|")]:
+                if alias:
+                    lookup[alias.strip().lower()] = row["country"]
+    return lookup
+
+
+COUNTRIES = country_lookup()
+
+
+def to_country(part):
+    """Turn one entry like 'german', 'The Netherlands' or 'Germnay' into a country name."""
+    key = re.sub(r"^the\s+", "", part.strip().lower())
+    if key in COUNTRIES:
+        return COUNTRIES[key]
+    match = difflib.get_close_matches(key, COUNTRIES.keys(), n=1, cutoff=0.85)
+    if match:
+        return COUNTRIES[match[0]]
+    print(f"Unknown country, kept as is: {part.strip()}")
+    return part.strip()
+
+
+def normalize_countries(value):
+    """Normalize a value with one or more countries, e.g. 'French, Dutch' -> 'France, Netherlands'."""
+    parts = [p for p in re.split(r"[,/&;]", value) if p.strip()]
+    countries = dict.fromkeys(to_country(p) for p in parts)
+    return ", ".join(countries)
 
 
 def call(fn, **kwargs):
@@ -164,7 +205,9 @@ def slack_profile_values(uid):
     """Read the custom profile fields of one user."""
     prof = call(client.users_profile_get, user=uid)["profile"]
     fields = prof.get("fields") or {}
-    return {prop: (fields.get(field_id) or {}).get("value", "") for prop, field_id in SLACK_FIELDS.items()}
+    values = {prop: (fields.get(field_id) or {}).get("value", "") for prop, field_id in SLACK_FIELDS.items()}
+    values[COUNTRY_PROPERTY] = normalize_countries(values[COUNTRY_PROPERTY])
+    return values
 
 
 def main():
