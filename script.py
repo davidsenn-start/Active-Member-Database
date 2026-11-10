@@ -201,6 +201,17 @@ def notion_set_inactive(page_id):
     notion_update_page(page_id, {NOTION_ACTIVE_PROPERTY: {"checkbox": False}})
 
 
+def notion_archive_page(page_id):
+    """Move a page to the Notion trash, where it can be restored for 30 days."""
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    resp = requests.patch(url, headers=notion_headers(), json={"archived": True}, timeout=30)
+    resp.raise_for_status()
+
+
+def has_full_name(name):
+    return len(name.split()) >= 2
+
+
 def slack_profile_values(uid):
     """Read the custom profile fields of one user."""
     prof = call(client.users_profile_get, user=uid)["profile"]
@@ -215,6 +226,7 @@ def main():
     created = 0
     updated = 0
     deactivated = 0
+    removed = []
     failed = 0
 
     schema = notion_schema()
@@ -233,6 +245,12 @@ def main():
                 if uid in existing_pages and NOTION_ACTIVE_PROPERTY in schema:
                     notion_set_inactive(existing_pages[uid])
                     deactivated += 1
+                continue
+
+            if not has_full_name(name):
+                if uid in existing_pages:
+                    notion_archive_page(existing_pages[uid])
+                    removed.append(name or uid)
                 continue
 
             values = slack_profile_values(uid)
@@ -261,6 +279,7 @@ def main():
     print(f"Notion created: {created}")
     print(f"Notion updated: {updated}")
     print(f"Notion set inactive: {deactivated}")
+    print(f"Notion removed (no first and last name in Slack): {len(removed)} {', '.join(removed)}")
     print(f"Failed: {failed}")
 
     if failed:
