@@ -26,6 +26,7 @@ jobs:
       - name: Run sync
         env:
           SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
+          SLACK_ADMIN_TOKEN: ${{ secrets.SLACK_ADMIN_TOKEN }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: python script.py

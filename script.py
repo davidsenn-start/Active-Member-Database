@@ -13,6 +13,8 @@ from tabulate import tabulate
 
 # ---- CONFIG ----
 SLACK_TOKEN = os.environ["SLACK_TOKEN"]
+# User token of a Slack admin with the users.profile:write scope; without it titles are not written to Slack
+SLACK_ADMIN_TOKEN = os.environ.get("SLACK_ADMIN_TOKEN", "")
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 NOTION_VERSION = "2022-06-28"
@@ -22,18 +24,17 @@ PROFILE_DELAY = 0.2
 NOTION_NAME_PROPERTY = "Name"  # type: Title
 NOTION_SLACK_ID_PROPERTY = "Slack User ID"  # type: Text
 NOTION_ACTIVE_PROPERTY = "Active"  # type: Checkbox
+# Set by the admin in Notion (Department, Role, Batch, Status are never written by this script).
+# Profile Title is a Notion formula; its value is written to the title field of the Slack profile.
+NOTION_PROFILE_TITLE_PROPERTY = "Profile Title"  # type: Formula
 
 # Notion property name -> Slack custom profile field ID
 # IDs come from https://slack.com/api/team.profile.get?visibility=all
 # The Notion type of each property (Text, Phone, URL, Email, Date, Select) is read from the database.
 SLACK_FIELDS = {
     "Birthday": "Xf05STPV0Z3R",
-    "Department": "Xf05TAPCM8PN",
-    "Batch": "Xf05T1LNGTB8",
     "Nationality": "Xf0AV382B7GT",
     "Phone": "Xf05STPV0UVD",
-    "Status": "Xf05TXA040N4",
-    "Title": "Xf05T1LNG7TQ",
     "University": "Xf0AV7HDFTL6",
     "Degree": "Xf0AVD77MTEY",
     "LinkedIn": "Xf0AV9K6BS9Y",
@@ -47,6 +48,7 @@ COUNTRY_PROPERTY = "Nationality"
 COUNTRIES_FILE = Path(__file__).parent / "countries.csv"
 
 client = WebClient(token=SLACK_TOKEN)
+admin_client = WebClient(token=SLACK_ADMIN_TOKEN) if SLACK_ADMIN_TOKEN else None
 
 
 def country_lookup():
@@ -119,7 +121,7 @@ def notion_headers():
 
 
 def notion_pages_by_slack_id():
-    """Load all pages of the database once and map Slack User ID -> page ID."""
+    """Load all pages of the database once and map Slack User ID -> page ID and Profile Title."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     pages = {}
     cursor = None
@@ -136,8 +138,9 @@ def notion_pages_by_slack_id():
         for page in data.get("results", []):
             texts = page["properties"].get(NOTION_SLACK_ID_PROPERTY, {}).get("rich_text", [])
             slack_id = "".join(t.get("plain_text", "") for t in texts).strip()
+            formula = page["properties"].get(NOTION_PROFILE_TITLE_PROPERTY, {}).get("formula", {})
             if slack_id:
-                pages[slack_id] = page["id"]
+                pages[slack_id] = {"id": page["id"], "profile_title": (formula.get("string") or "").strip()}
 
         if not data.get("has_more"):
             break
@@ -212,13 +215,17 @@ def has_full_name(name):
     return len(name.split()) >= 2
 
 
-def slack_profile_values(uid):
-    """Read the custom profile fields of one user."""
+def slack_profile(uid):
+    """Read the custom profile fields and the title of one user."""
     prof = call(client.users_profile_get, user=uid)["profile"]
     fields = prof.get("fields") or {}
     values = {prop: (fields.get(field_id) or {}).get("value", "") for prop, field_id in SLACK_FIELDS.items()}
     values[COUNTRY_PROPERTY] = normalize_countries(values[COUNTRY_PROPERTY])
-    return values
+    return values, prof.get("title") or ""
+
+
+def slack_set_title(uid, title):
+    call(admin_client.users_profile_set, user=uid, profile={"title": title})
 
 
 def main():
@@ -227,12 +234,15 @@ def main():
     updated = 0
     deactivated = 0
     removed = []
+    titles_set = 0
     failed = 0
 
     schema = notion_schema()
-    missing = [p for p in [NOTION_ACTIVE_PROPERTY, *SLACK_FIELDS] if p not in schema]
+    missing = [p for p in [NOTION_ACTIVE_PROPERTY, NOTION_PROFILE_TITLE_PROPERTY, *SLACK_FIELDS] if p not in schema]
     if missing:
         print(f"Not in the Notion database, skipped: {', '.join(missing)}")
+    if not admin_client:
+        print("SLACK_ADMIN_TOKEN not set, profile titles are not written to Slack")
 
     existing_pages = notion_pages_by_slack_id()
 
@@ -243,22 +253,27 @@ def main():
         try:
             if user.get("deleted"):
                 if uid in existing_pages and NOTION_ACTIVE_PROPERTY in schema:
-                    notion_set_inactive(existing_pages[uid])
+                    notion_set_inactive(existing_pages[uid]["id"])
                     deactivated += 1
                 continue
 
             if not has_full_name(name):
                 if uid in existing_pages:
-                    notion_archive_page(existing_pages[uid])
+                    notion_archive_page(existing_pages[uid]["id"])
                     removed.append(name or uid)
                 continue
 
-            values = slack_profile_values(uid)
+            values, slack_title = slack_profile(uid)
             properties = notion_properties(schema, name, uid, values)
 
             if uid in existing_pages:
-                notion_update_page(existing_pages[uid], properties)
+                notion_update_page(existing_pages[uid]["id"], properties)
                 updated += 1
+
+                profile_title = existing_pages[uid]["profile_title"]
+                if admin_client and profile_title and profile_title != slack_title:
+                    slack_set_title(uid, profile_title)
+                    titles_set += 1
             else:
                 notion_create_page(properties)
                 created += 1
@@ -280,6 +295,7 @@ def main():
     print(f"Notion updated: {updated}")
     print(f"Notion set inactive: {deactivated}")
     print(f"Notion removed (no first and last name in Slack): {len(removed)} {', '.join(removed)}")
+    print(f"Slack titles updated from Notion: {titles_set}")
     print(f"Failed: {failed}")
 
     if failed:
